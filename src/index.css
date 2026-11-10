@@ -1,0 +1,96 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-display: 'Fredoka', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #1a0826;
+    color: #FFF4E0;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+  }
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.font-serif-title {
+  font-family: 'Playfair Display', Georgia, serif;
+}
+
+.font-body {
+  font-family: var(--font-body);
+}
+
+/* Custom smooth scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #1a0826;
+}
+::-webkit-scrollbar-thumb {
+  background: #4B1D6B;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3E9B3A;
+}
+
+/* Subtle periodic WhatsApp button pulse */
+@keyframes periodic-pulse {
+  0%, 70%, 100% {
+    transform: scale(1);
+    box-shadow: 0 10px 30px -5px rgba(37, 211, 102, 0.4);
+  }
+  85% {
+    transform: scale(1.06);
+    box-shadow: 0 14px 40px 4px rgba(37, 211, 102, 0.7);
+  }
+}
+
+.animate-periodic-pulse {
+  animation: periodic-pulse 3.5s infinite ease-in-out;
+}
+
+/* Text shadows for scroll overlays: lightweight on mobile to avoid GPU compositing jank */
+.text-contrast-title {
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.75);
+}
+
+.text-contrast-sub {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+@media (min-width: 768px) {
+  .text-contrast-title {
+    text-shadow:
+      0 2px 6px rgba(0, 0, 0, 0.75),
+      0 4px 18px rgba(0, 0, 0, 0.6),
+      0 1px 2px rgba(15, 3, 22, 0.85);
+  }
+
+  .text-contrast-sub {
+    text-shadow:
+      0 2px 4px rgba(0, 0, 0, 0.7),
+      0 3px 14px rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Soft edge mask for main hero canvas: active only on desktop */
+@media (min-width: 768px) {
+  .hero-canvas-mask {
+    -webkit-mask-image: linear-gradient(to right, transparent 0%, black 18%, black 82%, transparent 100%);
+    mask-image: linear-gradient(to right, transparent 0%, black 18%, black 82%, transparent 100%);
+  }
+}

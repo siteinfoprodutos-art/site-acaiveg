@@ -1,0 +1,6 @@
+{
+  "name": "Açaí Veg - Experiência Cinematográfica",
+  "description": "Site one-page cinematográfico com efeito de scroll animado, cardápio artesanal e pedidos via WhatsApp para a açaiteria Açaí Veg.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
