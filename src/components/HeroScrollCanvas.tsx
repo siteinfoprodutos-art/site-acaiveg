@@ -34,11 +34,10 @@ export const HeroScrollCanvas: React.FC = () => {
   const imagesRef = useRef<(HTMLImageElement | null)[]>(new Array(FRAME_CONFIG.totalFrames).fill(null));
   const lastValidImageRef = useRef<HTMLImageElement | null>(null);
 
-  // Smooth frame chasing target and current values
-  const targetFrameRef = useRef<number>(0);
-  const currentFrameRef = useRef<number>(0);
-  const lastRenderedFrameRef = useRef<number>(-1);
-  const rafIdRef = useRef<number | null>(null);
+  // Single frame index state with RAF rendering throttle
+  const frameIndexRef = useRef<number>(0);
+  const lastDrawnIndexRef = useRef<number>(-1);
+  const renderPendingRef = useRef<boolean>(false);
   const particlesRafRef = useRef<number | null>(null);
 
   // Preloader & scroll state
@@ -78,167 +77,133 @@ export const HeroScrollCanvas: React.FC = () => {
   }, []);
 
   /**
-   * Main render function: paints frame with fractional crossfade for 100% continuous animation
+   * Main render function: Paints frame onto main canvas and tiny 32x56 background canvas
    */
-  const renderFrame = useCallback((frameVal: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const renderFrame = useCallback(
+    (frameIdx: number) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
 
-    const clientWidth = canvas.clientWidth || window.innerWidth;
-    const clientHeight = canvas.clientHeight || window.innerHeight;
-    const isMobile = clientWidth < 768;
+      const clientWidth = canvas.clientWidth || window.innerWidth;
+      const clientHeight = canvas.clientHeight || window.innerHeight;
+      const isMobile = clientWidth < 768;
 
-    const dpr = isMobile
-      ? Math.min(window.devicePixelRatio || 1, 1.5)
-      : Math.min(window.devicePixelRatio || 1, 2);
+      // devicePixelRatio capped at 1.5 as requested
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
-    const clampedFrame = Math.max(0, Math.min(FRAME_CONFIG.totalFrames - 1, frameVal));
-    const baseIdx = Math.floor(clampedFrame);
-    const nextIdx = Math.min(FRAME_CONFIG.totalFrames - 1, baseIdx + 1);
-    const alpha = clampedFrame - baseIdx;
-
-    const baseImg = getValidImage(baseIdx);
-    if (baseImg) {
-      lastValidImageRef.current = baseImg;
-    }
-
-    // 1. Render Tiny Blurred Background Canvas (32x56) using nearest frame only for speed
-    const bgCanvas = bgCanvasRef.current;
-    if (bgCanvas) {
-      const bgW = 32;
-      const bgH = 56;
-      if (bgCanvas.width !== bgW || bgCanvas.height !== bgH) {
-        bgCanvas.width = bgW;
-        bgCanvas.height = bgH;
+      const clampedIdx = Math.max(0, Math.min(FRAME_CONFIG.totalFrames - 1, frameIdx));
+      const img = getValidImage(clampedIdx);
+      if (img) {
+        lastValidImageRef.current = img;
       }
-      const bgCtx = bgCanvas.getContext('2d', { alpha: false });
-      if (bgCtx) {
-        bgCtx.imageSmoothingEnabled = true;
-        const nearestImg = getValidImage(Math.round(clampedFrame));
-        if (nearestImg && nearestImg.complete && nearestImg.naturalWidth > 0) {
-          const imgW = nearestImg.naturalWidth || FRAME_CONFIG.width;
-          const imgH = nearestImg.naturalHeight || FRAME_CONFIG.height;
-          const bgScale = Math.max(bgW / imgW, bgH / imgH);
-          const bgDrawW = imgW * bgScale;
-          const bgDrawH = imgH * bgScale;
-          const bgOffsetX = (bgW - bgDrawW) / 2;
-          const bgOffsetY = (bgH - bgDrawH) / 2;
-          bgCtx.drawImage(nearestImg, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
-        } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
-          const vid = fallbackVideoRef.current;
-          const vidW = vid.videoWidth || FRAME_CONFIG.width;
-          const vidH = vid.videoHeight || FRAME_CONFIG.height;
-          const bgScale = Math.max(bgW / vidW, bgH / vidH);
-          const bgDrawW = vidW * bgScale;
-          const bgDrawH = vidH * bgScale;
-          const bgOffsetX = (bgW - bgDrawW) / 2;
-          const bgOffsetY = (bgH - bgDrawH) / 2;
-          bgCtx.drawImage(vid, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
+
+      // 1. Render Tiny Background Canvas (32x56) - stretched by CSS
+      const bgCanvas = bgCanvasRef.current;
+      if (bgCanvas) {
+        const bgW = 32;
+        const bgH = 56;
+        if (bgCanvas.width !== bgW || bgCanvas.height !== bgH) {
+          bgCanvas.width = bgW;
+          bgCanvas.height = bgH;
+        }
+        const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+        if (bgCtx) {
+          bgCtx.imageSmoothingEnabled = true;
+          bgCtx.imageSmoothingQuality = 'medium';
+          if (img && img.complete && img.naturalWidth > 0) {
+            const imgW = img.naturalWidth || FRAME_CONFIG.width;
+            const imgH = img.naturalHeight || FRAME_CONFIG.height;
+            const bgScale = Math.max(bgW / imgW, bgH / imgH);
+            const bgDrawW = imgW * bgScale;
+            const bgDrawH = imgH * bgScale;
+            const bgOffsetX = (bgW - bgDrawW) / 2;
+            const bgOffsetY = (bgH - bgDrawH) / 2;
+            bgCtx.drawImage(img, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
+          } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
+            const vid = fallbackVideoRef.current;
+            const vidW = vid.videoWidth || FRAME_CONFIG.width;
+            const vidH = vid.videoHeight || FRAME_CONFIG.height;
+            const bgScale = Math.max(bgW / vidW, bgH / vidH);
+            const bgDrawW = vidW * bgScale;
+            const bgDrawH = vidH * bgScale;
+            const bgOffsetX = (bgW - bgDrawW) / 2;
+            const bgOffsetY = (bgH - bgDrawH) / 2;
+            bgCtx.drawImage(vid, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
+          }
         }
       }
-    }
 
-    // 2. Render Main Foreground Canvas with crossfade
-    const ctx = canvas.getContext('2d', { alpha: true });
-    if (!ctx) return;
+      // 2. Render Main Foreground Canvas
+      const ctx = canvas.getContext('2d', { alpha: true });
+      if (!ctx) return;
 
-    const targetWidth = Math.round(clientWidth * dpr);
-    const targetHeight = Math.round(clientHeight * dpr);
+      const targetWidth = Math.round(clientWidth * dpr);
+      const targetHeight = Math.round(clientHeight * dpr);
 
-    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
-      canvas.width = targetWidth;
-      canvas.height = targetHeight;
-    }
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, clientWidth, clientHeight);
-
-    const drawImageToCanvas = (img: HTMLImageElement, opacity: number) => {
-      const imgW = img.naturalWidth || FRAME_CONFIG.width;
-      const imgH = img.naturalHeight || FRAME_CONFIG.height;
-
-      const scale = isMobile
-        ? Math.max(clientWidth / imgW, clientHeight / imgH)
-        : Math.min(clientWidth / imgW, clientHeight / imgH);
-
-      const drawW = imgW * scale;
-      const drawH = imgH * scale;
-      const offsetX = (clientWidth - drawW) / 2;
-      const offsetY = (clientHeight - drawH) / 2;
-
-      ctx.globalAlpha = opacity;
-      ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
-    };
-
-    if (baseImg) {
-      drawImageToCanvas(baseImg, 1.0);
-
-      // Sub-pixel crossfade with next frame if fractional part exists
-      if (alpha > 0.01 && baseIdx !== nextIdx) {
-        const nextImg = getValidImage(nextIdx);
-        if (nextImg && nextImg !== baseImg) {
-          drawImageToCanvas(nextImg, alpha);
-        }
+      if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
       }
-      ctx.globalAlpha = 1.0;
-    } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
-      const vid = fallbackVideoRef.current;
-      const vidW = vid.videoWidth || FRAME_CONFIG.width;
-      const vidH = vid.videoHeight || FRAME_CONFIG.height;
 
-      const scale = isMobile
-        ? Math.max(clientWidth / vidW, clientHeight / vidH)
-        : Math.min(clientWidth / vidW, clientHeight / vidH);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'medium';
+      ctx.clearRect(0, 0, clientWidth, clientHeight);
 
-      const drawW = vidW * scale;
-      const drawH = vidH * scale;
-      const offsetX = (clientWidth - drawW) / 2;
-      const offsetY = (clientHeight - drawH) / 2;
+      if (img && img.complete && img.naturalWidth > 0) {
+        const imgW = img.naturalWidth || FRAME_CONFIG.width;
+        const imgH = img.naturalHeight || FRAME_CONFIG.height;
 
-      ctx.drawImage(vid, offsetX, offsetY, drawW, drawH);
-    }
-  }, [getValidImage]);
+        const scale = isMobile
+          ? Math.max(clientWidth / imgW, clientHeight / imgH)
+          : Math.min(clientWidth / imgW, clientHeight / imgH);
+
+        const drawW = imgW * scale;
+        const drawH = imgH * scale;
+        const offsetX = (clientWidth - drawW) / 2;
+        const offsetY = (clientHeight - drawH) / 2;
+
+        ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+      } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
+        const vid = fallbackVideoRef.current;
+        const vidW = vid.videoWidth || FRAME_CONFIG.width;
+        const vidH = vid.videoHeight || FRAME_CONFIG.height;
+
+        const scale = isMobile
+          ? Math.max(clientWidth / vidW, clientHeight / vidH)
+          : Math.min(clientWidth / vidW, clientHeight / vidH);
+
+        const drawW = vidW * scale;
+        const drawH = vidH * scale;
+        const offsetX = (clientWidth - drawW) / 2;
+        const offsetY = (clientHeight - drawH) / 2;
+
+        ctx.drawImage(vid, offsetX, offsetY, drawW, drawH);
+      }
+    },
+    [getValidImage]
+  );
 
   /**
-   * Continuous RAF loop chasing targetFrameRef smoothly with 0.12 lerp factor
+   * Request render inside a single requestAnimationFrame, drawing ONLY when frame index changed
    */
-  useEffect(() => {
-    let animId: number;
-    let lastTime = performance.now();
-
-    const loop = (now: number) => {
-      const dt = Math.min((now - lastTime) / 1000, 0.1);
-      lastTime = now;
-
-      // Time-delta independent lerp factor targeting ~0.12 at 60fps
-      const lerpFactor = 1 - Math.pow(1 - 0.12, dt * 60);
-      const diff = targetFrameRef.current - currentFrameRef.current;
-
-      if (Math.abs(diff) > 0.0005) {
-        currentFrameRef.current += diff * lerpFactor;
-      } else {
-        currentFrameRef.current = targetFrameRef.current;
+  const requestRender = useCallback(() => {
+    if (renderPendingRef.current) return;
+    renderPendingRef.current = true;
+    requestAnimationFrame(() => {
+      renderPendingRef.current = false;
+      if (frameIndexRef.current !== lastDrawnIndexRef.current) {
+        lastDrawnIndexRef.current = frameIndexRef.current;
+        renderFrame(frameIndexRef.current);
       }
-
-      // Only draw when current frame changed perceptibly (> 0.01 difference)
-      if (Math.abs(currentFrameRef.current - lastRenderedFrameRef.current) > 0.01) {
-        lastRenderedFrameRef.current = currentFrameRef.current;
-        renderFrame(currentFrameRef.current);
-      }
-
-      animId = requestAnimationFrame(loop);
-    };
-
-    animId = requestAnimationFrame(loop);
-
-    return () => {
-      cancelAnimationFrame(animId);
-    };
+    });
   }, [renderFrame]);
 
   /**
    * Primary: Preload the 96 static JPG frames directly from /frames/
    * frame00001.jpg, frame00003.jpg, ... frame00191.jpg (odd numbers, 96 files)
+   * Calls img.decode() on each frame and unlocks page when ALL are ready.
+   * Frame 0 immediate draw as soon as available.
    */
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -251,14 +216,17 @@ export const HeroScrollCanvas: React.FC = () => {
     let loadedSuccess = 0;
     let loadedErrors = 0;
 
-    console.log(`[Açaí Veg] Iniciando carregamento de ${total} frames de /frames/...`);
+    console.log(`[Açaí Veg] Iniciando pré-carregamento completo de ${total} frames com img.decode()...`);
 
-    // Safety timeout: reveal page after max 2.5s even on slow 3G
+    // Safety timeout: reveal page after max 2.5s if network stalls
     const safetyTimer = setTimeout(() => {
       if (isMounted && !isLoaded) {
-        console.warn(`[Açaí Veg] Timeout de segurança atingido. Exibindo com ${loadedSuccess} frames carregados.`);
+        console.warn(`[Açaí Veg] Timeout de segurança atingido. Exibindo com ${loadedSuccess} frames.`);
         setIsLoaded(true);
+        frameIndexRef.current = 0;
+        lastDrawnIndexRef.current = -1;
         renderFrame(0);
+        setTimeout(() => ScrollTrigger.refresh(), 100);
       }
     }, 2500);
 
@@ -274,7 +242,9 @@ export const HeroScrollCanvas: React.FC = () => {
         const markLoaded = () => {
           if (!isMounted) return;
           imagesRef.current[i] = img;
-          if (!lastValidImageRef.current) {
+
+          // Frame 0 imediato: renderiza o primeiro frame assim que disponível
+          if (!lastValidImageRef.current || i === 0) {
             lastValidImageRef.current = img;
             renderFrame(0);
           }
@@ -283,10 +253,16 @@ export const HeroScrollCanvas: React.FC = () => {
           const percent = Math.min(100, Math.round((loadedSuccess / total) * 100));
           setLoadProgress(percent);
 
+          // Libera a tela SOMENTE quando todos estiverem carregados
           if (loadedSuccess + loadedErrors >= total) {
-            console.log(`[Açaí Veg] Carregamento concluído: ${loadedSuccess}/${total} frames prontos.`);
+            console.log(`[Açaí Veg] Pré-carregamento 100% concluído: ${loadedSuccess}/${total} frames prontos.`);
             setIsLoaded(true);
+            frameIndexRef.current = 0;
+            lastDrawnIndexRef.current = -1;
             renderFrame(0);
+            setTimeout(() => {
+              ScrollTrigger.refresh();
+            }, 100);
           }
         };
 
@@ -302,7 +278,6 @@ export const HeroScrollCanvas: React.FC = () => {
         loadedErrors++;
         console.error(`[Açaí Veg] Erro ao carregar frame ${i} (${url}):`, e);
 
-        // If many images fail, activate video fallback
         if (loadedErrors > 15 && !usingVideoFallback) {
           console.warn('[Açaí Veg] Ativando fallback de vídeo devido a falhas nos frames.');
           setUsingVideoFallback(true);
@@ -311,6 +286,9 @@ export const HeroScrollCanvas: React.FC = () => {
         if (loadedSuccess + loadedErrors >= total) {
           setIsLoaded(true);
           renderFrame(0);
+          setTimeout(() => {
+            ScrollTrigger.refresh();
+          }, 100);
         }
       };
     }
@@ -322,51 +300,35 @@ export const HeroScrollCanvas: React.FC = () => {
   }, [isLoaded, renderFrame, usingVideoFallback]);
 
   /**
-   * Lenis Smooth Scroll integration
-   */
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const LenisClass = (window as unknown as { Lenis?: any }).Lenis;
-    if (!LenisClass) return;
-
-    const lenis = new LenisClass({
-      lerp: 0.1,
-      syncTouch: true,
-      syncTouchLerp: 0.07,
-    });
-
-    lenis.on('scroll', ScrollTrigger.update);
-
-    const updateLenis = (time: number) => {
-      lenis.raf(time * 1000);
-    };
-
-    gsap.ticker.add(updateLenis);
-    gsap.ticker.lagSmoothing(0);
-
-    return () => {
-      gsap.ticker.remove(updateLenis);
-      lenis.destroy();
-    };
-  }, []);
-
-  /**
-   * GSAP ScrollTrigger binding to 500vh container
+   * GSAP ScrollTrigger com scrub numérico (0.5) para suavização única
    */
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    let resizeTimer: NodeJS.Timeout;
+
     const handleResize = () => {
       setIsMobileState(window.innerWidth < 768);
-      renderFrame(currentFrameRef.current);
+      // Re-render current frame on resize
+      renderFrame(frameIndexRef.current);
+
+      // Debounced ScrollTrigger.refresh() call
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        ScrollTrigger.refresh();
+      }, 150);
     };
     window.addEventListener('resize', handleResize);
 
     if (reducedMotion) {
-      targetFrameRef.current = FRAME_CONFIG.totalFrames - 1;
+      frameIndexRef.current = FRAME_CONFIG.totalFrames - 1;
       setScrollProgress(1);
-      return () => window.removeEventListener('resize', handleResize);
+      requestRender();
+      return () => {
+        window.removeEventListener('resize', handleResize);
+        clearTimeout(resizeTimer);
+      };
     }
 
     const ctx = gsap.context(() => {
@@ -374,15 +336,16 @@ export const HeroScrollCanvas: React.FC = () => {
         trigger: container,
         start: 'top top',
         end: 'bottom bottom',
-        scrub: true,
+        scrub: 0.5,
         onUpdate: (self) => {
           const progress = self.progress;
           setScrollProgress(progress);
 
-          targetFrameRef.current = Math.min(
-            FRAME_CONFIG.totalFrames - 1,
-            Math.max(0, progress * (FRAME_CONFIG.totalFrames - 1))
-          );
+          const newIndex = Math.round(progress * (FRAME_CONFIG.totalFrames - 1));
+          if (newIndex !== frameIndexRef.current) {
+            frameIndexRef.current = newIndex;
+            requestRender();
+          }
 
           if (usingVideoFallback && fallbackVideoRef.current) {
             const vid = fallbackVideoRef.current;
@@ -394,17 +357,18 @@ export const HeroScrollCanvas: React.FC = () => {
       });
     }, container);
 
-    // Initial render
+    // Render inicial
     renderFrame(0);
 
     return () => {
       ctx.revert();
       window.removeEventListener('resize', handleResize);
+      clearTimeout(resizeTimer);
     };
-  }, [reducedMotion, renderFrame, usingVideoFallback]);
+  }, [reducedMotion, renderFrame, requestRender, usingVideoFallback]);
 
   /**
-   * Floating light particles: desktop only (disabled on mobile for zero CPU/GPU overhead)
+   * Floating light particles: desktop only
    */
   useEffect(() => {
     if (typeof window !== 'undefined' && window.innerWidth < 768) return;
@@ -424,7 +388,6 @@ export const HeroScrollCanvas: React.FC = () => {
     };
     window.addEventListener('resize', handleResize);
 
-    // 25 ambient particles
     const particleCount = 25;
     const particles: Particle[] = [];
     for (let i = 0; i < particleCount; i++) {
@@ -450,7 +413,6 @@ export const HeroScrollCanvas: React.FC = () => {
         p.x += p.speedX;
         p.pulsePhase += 0.025;
 
-        // Wrap around
         if (p.y < -10) {
           p.y = height + 10;
           p.x = Math.random() * width;
@@ -484,23 +446,13 @@ export const HeroScrollCanvas: React.FC = () => {
     };
   }, []);
 
-  // Subtle background color shift from deep dark purple to vibrant royal açaí purple
-  const bgR = Math.round(19 + scrollProgress * (55 - 19));
-  const bgG = Math.round(4 + scrollProgress * (14 - 4));
-  const bgB = Math.round(31 + scrollProgress * (78 - 31));
-  const currentBgColor = `rgb(${bgR}, ${bgG}, ${bgB})`;
-
-  // =========================================================================
   // Non-overlapping text phase transitions with smooth Hermite easing
-  // =========================================================================
-
-  // Helper smoothstep function for organic fade in/out
   const smoothstep = (min: number, max: number, value: number) => {
     const x = Math.max(0, Math.min(1, (value - min) / (max - min)));
     return x * x * (3 - 2 * x);
   };
 
-  // Phase 1 (Início): 0.0 to 0.22 (peaks 0.0 - 0.10, exits smoothly upwards 0.10 - 0.22)
+  // Phase 1 (Início): 0.0 to 0.22
   let p1Opacity = 0;
   let p1Y = 0;
   if (scrollProgress <= 0.22) {
@@ -511,11 +463,11 @@ export const HeroScrollCanvas: React.FC = () => {
       const exitRatio = (scrollProgress - 0.10) / 0.12;
       const t = smoothstep(0, 1, exitRatio);
       p1Opacity = Math.max(0, 1 - t);
-      p1Y = -10 - t * 30; // gentle upward exit
+      p1Y = -10 - t * 30;
     }
   }
 
-  // Phase 2 (Meio): 0.29 to 0.63 (enters 0.29-0.38 with upward rise, peaks 0.38-0.52, exits upwards 0.52-0.63)
+  // Phase 2 (Meio): 0.29 to 0.63
   let p2Opacity = 0;
   let p2Y = 0;
   if (scrollProgress >= 0.29 && scrollProgress <= 0.63) {
@@ -523,7 +475,7 @@ export const HeroScrollCanvas: React.FC = () => {
       const enterRatio = (scrollProgress - 0.29) / 0.09;
       const t = smoothstep(0, 1, enterRatio);
       p2Opacity = t;
-      p2Y = 28 * (1 - t); // enters with upward rise from +28px to 0
+      p2Y = 28 * (1 - t);
     } else if (scrollProgress <= 0.52) {
       p2Opacity = 1;
       p2Y = 0;
@@ -531,11 +483,11 @@ export const HeroScrollCanvas: React.FC = () => {
       const exitRatio = (scrollProgress - 0.52) / 0.11;
       const t = smoothstep(0, 1, exitRatio);
       p2Opacity = Math.max(0, 1 - t);
-      p2Y = -t * 28; // exits smoothly upwards to -28px
+      p2Y = -t * 28;
     }
   }
 
-  // Phase 3 (Fim): 0.70 to 1.0 (enters 0.70-0.80 with upward rise, peaks 0.80-1.0)
+  // Phase 3 (Fim): 0.70 to 1.0
   let p3Opacity = 0;
   let p3Y = 0;
   if (scrollProgress >= 0.70) {
@@ -543,14 +495,14 @@ export const HeroScrollCanvas: React.FC = () => {
       const enterRatio = (scrollProgress - 0.70) / 0.10;
       const t = smoothstep(0, 1, enterRatio);
       p3Opacity = t;
-      p3Y = 28 * (1 - t); // enters with upward rise from +28px to 0
+      p3Y = 28 * (1 - t);
     } else {
       p3Opacity = 1;
       p3Y = 0;
     }
   }
 
-  // Dynamic soft mask to dissolve edges: lateral dissolve on desktop only (no mask on mobile)
+  // Dynamic soft mask: lateral dissolve on desktop only
   const maskStyle: React.CSSProperties = isMobileState
     ? {}
     : {
@@ -608,7 +560,9 @@ export const HeroScrollCanvas: React.FC = () => {
             type="button"
             onClick={() => {
               setIsLoaded(true);
+              frameIndexRef.current = 0;
               renderFrame(0);
+              setTimeout(() => ScrollTrigger.refresh(), 100);
             }}
             className="mt-6 text-xs text-purple-300/60 hover:text-[#FFF4E0] underline transition-colors cursor-pointer"
           >
@@ -619,13 +573,13 @@ export const HeroScrollCanvas: React.FC = () => {
 
       {/* STICKY CANVAS WRAPPER (Occupies entire screen with 100svh support) */}
       <div className="sticky top-0 left-0 w-full h-screen h-[100svh] overflow-hidden flex items-center justify-center bg-[#1A0B2E]">
-        {/* Layer 1: Fundo esticado em 32x56 sem CSS blur (desempenho ultraleve) */}
+        {/* Layer 1: Fundo esticado em 32x56 sem CSS blur */}
         <canvas
           ref={bgCanvasRef}
           className="absolute inset-0 w-full h-full block pointer-events-none z-0 object-cover scale-105 [transform:translateZ(0)] will-change-transform"
         />
 
-        {/* Layer 2: Overlay de cor semitransparente (#1A0B2E) sem filtros caros */}
+        {/* Layer 2: Overlay de cor semitransparente (#1A0B2E) */}
         <div
           className="absolute inset-0 pointer-events-none z-[2]"
           style={{
@@ -639,20 +593,18 @@ export const HeroScrollCanvas: React.FC = () => {
           className="hidden md:block absolute inset-0 w-full h-full pointer-events-none z-[5]"
         />
 
-        {/* Layer 4: Canvas principal com translateZ(0) e máscara ativa apenas no desktop */}
+        {/* Layer 4: Canvas principal com translateZ(0) */}
         <canvas
           ref={canvasRef}
           style={maskStyle}
           className="relative z-10 w-full h-full block pointer-events-none hero-canvas-mask cursor-default [transform:translateZ(0)] will-change-transform"
         />
 
-        {/* Layer 5: Vinhetas suaves de transição no topo e base para passagem perfeita */}
+        {/* Layer 5: Vinhetas suaves de transição no topo e base */}
         <div className="absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-[#1A0B2E]/90 via-[#1A0B2E]/40 to-transparent pointer-events-none z-20" />
         <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-[#1A0B2E] via-[#1A0B2E]/80 to-transparent pointer-events-none z-20" />
 
-        {/* ============================================================== */}
-        {/* TEXT OVERLAY 1: INÍCIO (0% - 22%)                              */}
-        {/* ============================================================== */}
+        {/* TEXT OVERLAY 1: INÍCIO (0% - 22%) */}
         <div
           className="absolute inset-x-0 top-1/5 sm:top-1/4 flex flex-col items-center justify-center text-center px-5 sm:px-8 pointer-events-none transition-all duration-300 z-30"
           style={{
@@ -682,9 +634,7 @@ export const HeroScrollCanvas: React.FC = () => {
           </div>
         </div>
 
-        {/* ============================================================== */}
-        {/* TEXT OVERLAY 2: MEIO (29% - 63%)                               */}
-        {/* ============================================================== */}
+        {/* TEXT OVERLAY 2: MEIO (29% - 63%) */}
         <div
           className="absolute inset-x-0 top-1/5 sm:top-1/4 flex flex-col items-center justify-center text-center px-5 sm:px-8 pointer-events-none transition-all duration-300 z-30"
           style={{
@@ -718,9 +668,7 @@ export const HeroScrollCanvas: React.FC = () => {
           </div>
         </div>
 
-        {/* ============================================================== */}
-        {/* TEXT OVERLAY 3: PERTO DO FIM (70% - 100%)                       */}
-        {/* ============================================================== */}
+        {/* TEXT OVERLAY 3: PERTO DO FIM (70% - 100%) */}
         <div
           className="absolute inset-x-0 top-1/5 sm:top-1/4 flex flex-col items-center justify-center text-center px-5 sm:px-8 transition-all duration-300 z-30"
           style={{
@@ -743,7 +691,6 @@ export const HeroScrollCanvas: React.FC = () => {
           </p>
 
           <div className="mt-8 sm:mt-10 flex flex-col sm:flex-row items-center gap-4">
-            {/* Pill button: purple with green details and gentle tap animation */}
             <a
               href={getWhatsAppLink()}
               target="_blank"
@@ -763,7 +710,7 @@ export const HeroScrollCanvas: React.FC = () => {
           </div>
         </div>
 
-        {/* SEAMLESS TRANSITION TO MENU SECTION (Gradient without harsh cuts to #1A0B2E) */}
+        {/* SEAMLESS TRANSITION TO MENU SECTION */}
         <div className="absolute inset-x-0 bottom-0 h-44 sm:h-64 bg-gradient-to-t from-[#1A0B2E] via-[#1A0B2E]/80 to-transparent pointer-events-none z-30" />
       </div>
     </div>
