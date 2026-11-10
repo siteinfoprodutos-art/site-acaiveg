@@ -34,9 +34,10 @@ export const HeroScrollCanvas: React.FC = () => {
   const imagesRef = useRef<(HTMLImageElement | null)[]>(new Array(FRAME_CONFIG.totalFrames).fill(null));
   const lastValidImageRef = useRef<HTMLImageElement | null>(null);
 
-  // Current and last rendered frame index to prevent redundant redraws
-  const frameIndexRef = useRef<number>(0);
-  const lastRenderedIndexRef = useRef<number>(-1);
+  // Smooth frame chasing target and current values
+  const targetFrameRef = useRef<number>(0);
+  const currentFrameRef = useRef<number>(0);
+  const lastRenderedFrameRef = useRef<number>(-1);
   const rafIdRef = useRef<number | null>(null);
   const particlesRafRef = useRef<number | null>(null);
 
@@ -51,9 +52,35 @@ export const HeroScrollCanvas: React.FC = () => {
   );
 
   /**
-   * Main render function: paints the target frame onto both canvases
+   * Helper: Retrieve a valid loaded image frame safely
    */
-  const renderFrame = useCallback((frameIdx: number) => {
+  const getValidImage = useCallback((idx: number): HTMLImageElement | null => {
+    let img = imagesRef.current[idx];
+    if (!img || !img.complete || img.naturalWidth === 0) {
+      for (let k = idx; k >= 0; k--) {
+        const candidate = imagesRef.current[k];
+        if (candidate && candidate.complete && candidate.naturalWidth > 0) {
+          img = candidate;
+          break;
+        }
+      }
+      if (!img) {
+        for (let k = idx + 1; k < FRAME_CONFIG.totalFrames; k++) {
+          const candidate = imagesRef.current[k];
+          if (candidate && candidate.complete && candidate.naturalWidth > 0) {
+            img = candidate;
+            break;
+          }
+        }
+      }
+    }
+    return img && img.complete && img.naturalWidth > 0 ? img : lastValidImageRef.current;
+  }, []);
+
+  /**
+   * Main render function: paints frame with fractional crossfade for 100% continuous animation
+   */
+  const renderFrame = useCallback((frameVal: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -61,41 +88,21 @@ export const HeroScrollCanvas: React.FC = () => {
     const clientHeight = canvas.clientHeight || window.innerHeight;
     const isMobile = clientWidth < 768;
 
-    // Limit DPR on mobile to max 1.5 to eliminate GPU fill-rate bottleneck
     const dpr = isMobile
       ? Math.min(window.devicePixelRatio || 1, 1.5)
       : Math.min(window.devicePixelRatio || 1, 2);
 
-    // 1. Retrieve the target frame image or fallback to last valid frame
-    let imgToDraw: HTMLImageElement | null = imagesRef.current[frameIdx];
+    const clampedFrame = Math.max(0, Math.min(FRAME_CONFIG.totalFrames - 1, frameVal));
+    const baseIdx = Math.floor(clampedFrame);
+    const nextIdx = Math.min(FRAME_CONFIG.totalFrames - 1, baseIdx + 1);
+    const alpha = clampedFrame - baseIdx;
 
-    if (!imgToDraw || !imgToDraw.complete || imgToDraw.naturalWidth === 0) {
-      for (let k = frameIdx; k >= 0; k--) {
-        const candidate = imagesRef.current[k];
-        if (candidate && candidate.complete && candidate.naturalWidth > 0) {
-          imgToDraw = candidate;
-          break;
-        }
-      }
-      if (!imgToDraw) {
-        for (let k = frameIdx + 1; k < FRAME_CONFIG.totalFrames; k++) {
-          const candidate = imagesRef.current[k];
-          if (candidate && candidate.complete && candidate.naturalWidth > 0) {
-            imgToDraw = candidate;
-            break;
-          }
-        }
-      }
+    const baseImg = getValidImage(baseIdx);
+    if (baseImg) {
+      lastValidImageRef.current = baseImg;
     }
 
-    if (imgToDraw && imgToDraw.complete && imgToDraw.naturalWidth > 0) {
-      lastValidImageRef.current = imgToDraw;
-    } else if (lastValidImageRef.current) {
-      imgToDraw = lastValidImageRef.current;
-    }
-
-    // 2. Render Tiny Blurred Background Canvas (Layer 1)
-    // 32 x 56 pixels: hardware stretched with bilinear smoothing by browser, NO expensive CSS blur filter
+    // 1. Render Tiny Blurred Background Canvas (32x56) using nearest frame only for speed
     const bgCanvas = bgCanvasRef.current;
     if (bgCanvas) {
       const bgW = 32;
@@ -107,15 +114,16 @@ export const HeroScrollCanvas: React.FC = () => {
       const bgCtx = bgCanvas.getContext('2d', { alpha: false });
       if (bgCtx) {
         bgCtx.imageSmoothingEnabled = true;
-        if (imgToDraw && imgToDraw.complete && imgToDraw.naturalWidth > 0) {
-          const imgW = imgToDraw.naturalWidth || FRAME_CONFIG.width;
-          const imgH = imgToDraw.naturalHeight || FRAME_CONFIG.height;
+        const nearestImg = getValidImage(Math.round(clampedFrame));
+        if (nearestImg && nearestImg.complete && nearestImg.naturalWidth > 0) {
+          const imgW = nearestImg.naturalWidth || FRAME_CONFIG.width;
+          const imgH = nearestImg.naturalHeight || FRAME_CONFIG.height;
           const bgScale = Math.max(bgW / imgW, bgH / imgH);
           const bgDrawW = imgW * bgScale;
           const bgDrawH = imgH * bgScale;
           const bgOffsetX = (bgW - bgDrawW) / 2;
           const bgOffsetY = (bgH - bgDrawH) / 2;
-          bgCtx.drawImage(imgToDraw, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
+          bgCtx.drawImage(nearestImg, bgOffsetX, bgOffsetY, bgDrawW, bgDrawH);
         } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
           const vid = fallbackVideoRef.current;
           const vidW = vid.videoWidth || FRAME_CONFIG.width;
@@ -130,14 +138,13 @@ export const HeroScrollCanvas: React.FC = () => {
       }
     }
 
-    // 3. Render Main Foreground Canvas with transparency (Layer 4)
+    // 2. Render Main Foreground Canvas with crossfade
     const ctx = canvas.getContext('2d', { alpha: true });
     if (!ctx) return;
 
     const targetWidth = Math.round(clientWidth * dpr);
     const targetHeight = Math.round(clientHeight * dpr);
 
-    // Only resize canvas buffer when dimensions actually change to prevent flushing GPU textures
     if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
       canvas.width = targetWidth;
       canvas.height = targetHeight;
@@ -146,11 +153,10 @@ export const HeroScrollCanvas: React.FC = () => {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, clientWidth, clientHeight);
 
-    if (imgToDraw && imgToDraw.complete && imgToDraw.naturalWidth > 0) {
-      const imgW = imgToDraw.naturalWidth || FRAME_CONFIG.width;
-      const imgH = imgToDraw.naturalHeight || FRAME_CONFIG.height;
+    const drawImageToCanvas = (img: HTMLImageElement, opacity: number) => {
+      const imgW = img.naturalWidth || FRAME_CONFIG.width;
+      const imgH = img.naturalHeight || FRAME_CONFIG.height;
 
-      // Cover mode on mobile, Contain mode on desktop
       const scale = isMobile
         ? Math.max(clientWidth / imgW, clientHeight / imgH)
         : Math.min(clientWidth / imgW, clientHeight / imgH);
@@ -160,7 +166,21 @@ export const HeroScrollCanvas: React.FC = () => {
       const offsetX = (clientWidth - drawW) / 2;
       const offsetY = (clientHeight - drawH) / 2;
 
-      ctx.drawImage(imgToDraw, offsetX, offsetY, drawW, drawH);
+      ctx.globalAlpha = opacity;
+      ctx.drawImage(img, offsetX, offsetY, drawW, drawH);
+    };
+
+    if (baseImg) {
+      drawImageToCanvas(baseImg, 1.0);
+
+      // Sub-pixel crossfade with next frame if fractional part exists
+      if (alpha > 0.01 && baseIdx !== nextIdx) {
+        const nextImg = getValidImage(nextIdx);
+        if (nextImg && nextImg !== baseImg) {
+          drawImageToCanvas(nextImg, alpha);
+        }
+      }
+      ctx.globalAlpha = 1.0;
     } else if (fallbackVideoRef.current && fallbackVideoRef.current.readyState >= 2) {
       const vid = fallbackVideoRef.current;
       const vidW = vid.videoWidth || FRAME_CONFIG.width;
@@ -177,21 +197,43 @@ export const HeroScrollCanvas: React.FC = () => {
 
       ctx.drawImage(vid, offsetX, offsetY, drawW, drawH);
     }
-  }, []);
+  }, [getValidImage]);
 
   /**
-   * RequestAnimationFrame wrapper: skips redundant redraws when index hasn't changed
+   * Continuous RAF loop chasing targetFrameRef smoothly with 0.12 lerp factor
    */
-  const requestFrameRender = useCallback((idx: number, forceRedraw = false) => {
-    frameIndexRef.current = idx;
-    if (rafIdRef.current !== null) {
-      cancelAnimationFrame(rafIdRef.current);
-    }
-    rafIdRef.current = requestAnimationFrame(() => {
-      if (!forceRedraw && lastRenderedIndexRef.current === frameIndexRef.current) return;
-      lastRenderedIndexRef.current = frameIndexRef.current;
-      renderFrame(frameIndexRef.current);
-    });
+  useEffect(() => {
+    let animId: number;
+    let lastTime = performance.now();
+
+    const loop = (now: number) => {
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
+      lastTime = now;
+
+      // Time-delta independent lerp factor targeting ~0.12 at 60fps
+      const lerpFactor = 1 - Math.pow(1 - 0.12, dt * 60);
+      const diff = targetFrameRef.current - currentFrameRef.current;
+
+      if (Math.abs(diff) > 0.0005) {
+        currentFrameRef.current += diff * lerpFactor;
+      } else {
+        currentFrameRef.current = targetFrameRef.current;
+      }
+
+      // Only draw when current frame changed perceptibly (> 0.01 difference)
+      if (Math.abs(currentFrameRef.current - lastRenderedFrameRef.current) > 0.01) {
+        lastRenderedFrameRef.current = currentFrameRef.current;
+        renderFrame(currentFrameRef.current);
+      }
+
+      animId = requestAnimationFrame(loop);
+    };
+
+    animId = requestAnimationFrame(loop);
+
+    return () => {
+      cancelAnimationFrame(animId);
+    };
   }, [renderFrame]);
 
   /**
@@ -216,7 +258,7 @@ export const HeroScrollCanvas: React.FC = () => {
       if (isMounted && !isLoaded) {
         console.warn(`[Açaí Veg] Timeout de segurança atingido. Exibindo com ${loadedSuccess} frames carregados.`);
         setIsLoaded(true);
-        requestFrameRender(0);
+        renderFrame(0);
       }
     }, 2500);
 
@@ -234,7 +276,7 @@ export const HeroScrollCanvas: React.FC = () => {
           imagesRef.current[i] = img;
           if (!lastValidImageRef.current) {
             lastValidImageRef.current = img;
-            requestFrameRender(0, true);
+            renderFrame(0);
           }
 
           loadedSuccess++;
@@ -244,7 +286,7 @@ export const HeroScrollCanvas: React.FC = () => {
           if (loadedSuccess + loadedErrors >= total) {
             console.log(`[Açaí Veg] Carregamento concluído: ${loadedSuccess}/${total} frames prontos.`);
             setIsLoaded(true);
-            requestFrameRender(0, true);
+            renderFrame(0);
           }
         };
 
@@ -268,7 +310,7 @@ export const HeroScrollCanvas: React.FC = () => {
 
         if (loadedSuccess + loadedErrors >= total) {
           setIsLoaded(true);
-          requestFrameRender(0);
+          renderFrame(0);
         }
       };
     }
@@ -277,35 +319,36 @@ export const HeroScrollCanvas: React.FC = () => {
       isMounted = false;
       clearTimeout(safetyTimer);
     };
-  }, [isLoaded, requestFrameRender, usingVideoFallback]);
+  }, [isLoaded, renderFrame, usingVideoFallback]);
 
   /**
-   * Secondary Video Fallback setup
-   * If images fail, controls video.currentTime by scroll progress
+   * Lenis Smooth Scroll integration
    */
   useEffect(() => {
-    if (!usingVideoFallback) return;
+    if (typeof window === 'undefined') return;
+    const LenisClass = (window as unknown as { Lenis?: any }).Lenis;
+    if (!LenisClass) return;
 
-    const video = document.createElement('video');
-    video.src = FRAME_CONFIG.videoUrl;
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = 'auto';
-    video.crossOrigin = 'anonymous';
+    const lenis = new LenisClass({
+      lerp: 0.1,
+      syncTouch: true,
+      syncTouchLerp: 0.07,
+    });
 
-    video.onloadeddata = () => {
-      fallbackVideoRef.current = video;
-      requestFrameRender(frameIndexRef.current);
+    lenis.on('scroll', ScrollTrigger.update);
+
+    const updateLenis = (time: number) => {
+      lenis.raf(time * 1000);
     };
 
-    video.onseeked = () => {
-      requestFrameRender(frameIndexRef.current);
-    };
+    gsap.ticker.add(updateLenis);
+    gsap.ticker.lagSmoothing(0);
 
     return () => {
-      video.src = '';
+      gsap.ticker.remove(updateLenis);
+      lenis.destroy();
     };
-  }, [usingVideoFallback, requestFrameRender]);
+  }, []);
 
   /**
    * GSAP ScrollTrigger binding to 500vh container
@@ -316,12 +359,12 @@ export const HeroScrollCanvas: React.FC = () => {
 
     const handleResize = () => {
       setIsMobileState(window.innerWidth < 768);
-      requestFrameRender(frameIndexRef.current, true);
+      renderFrame(currentFrameRef.current);
     };
     window.addEventListener('resize', handleResize);
 
     if (reducedMotion) {
-      requestFrameRender(FRAME_CONFIG.totalFrames - 1, true);
+      targetFrameRef.current = FRAME_CONFIG.totalFrames - 1;
       setScrollProgress(1);
       return () => window.removeEventListener('resize', handleResize);
     }
@@ -331,14 +374,14 @@ export const HeroScrollCanvas: React.FC = () => {
         trigger: container,
         start: 'top top',
         end: 'bottom bottom',
-        scrub: 0.4,
+        scrub: true,
         onUpdate: (self) => {
           const progress = self.progress;
           setScrollProgress(progress);
 
-          const targetIndex = Math.min(
+          targetFrameRef.current = Math.min(
             FRAME_CONFIG.totalFrames - 1,
-            Math.max(0, Math.round(progress * (FRAME_CONFIG.totalFrames - 1)))
+            Math.max(0, progress * (FRAME_CONFIG.totalFrames - 1))
           );
 
           if (usingVideoFallback && fallbackVideoRef.current) {
@@ -347,23 +390,18 @@ export const HeroScrollCanvas: React.FC = () => {
               vid.currentTime = progress * vid.duration;
             }
           }
-
-          if (targetIndex !== lastRenderedIndexRef.current) {
-            requestFrameRender(targetIndex);
-          }
         },
       });
     }, container);
 
     // Initial render
-    requestFrameRender(0, true);
+    renderFrame(0);
 
     return () => {
       ctx.revert();
       window.removeEventListener('resize', handleResize);
-      if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
     };
-  }, [reducedMotion, requestFrameRender, usingVideoFallback]);
+  }, [reducedMotion, renderFrame, usingVideoFallback]);
 
   /**
    * Floating light particles: desktop only (disabled on mobile for zero CPU/GPU overhead)
@@ -570,7 +608,7 @@ export const HeroScrollCanvas: React.FC = () => {
             type="button"
             onClick={() => {
               setIsLoaded(true);
-              requestFrameRender(0, true);
+              renderFrame(0);
             }}
             className="mt-6 text-xs text-purple-300/60 hover:text-[#FFF4E0] underline transition-colors cursor-pointer"
           >
